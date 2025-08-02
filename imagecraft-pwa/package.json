@@ -1,19 +1,43 @@
 {
   "name": "imagecraft-pwa",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "dependencies": {
+    "@clerk/clerk-react": "^5.38.0",
+    "@imagemagick/magick-wasm": "^0.0.35",
+    "@radix-ui/react-slider": "^1.3.5",
+    "browser-image-compression": "^2.0.2",
+    "framer-motion": "^12.23.12",
     "lucide-react": "^0.263.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
+    "react-router-dom": "^6.23.1",
     "react-scripts": "5.0.1",
-    "workbox-webpack-plugin": "^7.0.0"
+    "sonner": "^2.0.6",
+    "web-vitals": "^3.5.0",
+    "workbox-webpack-plugin": "^7.0.0",
+    "zustand": "^4.4.7"
   },
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test",
-    "eject": "react-scripts eject"
+    "test:coverage": "react-scripts test --coverage --watchAll=false",
+    "test:ci": "CI=true react-scripts test --coverage --watchAll=false --maxWorkers=2",
+    "test:unit": "react-scripts test --testPathPattern=__tests__ --watchAll=false",
+    "test:integration": "react-scripts test --testPathPattern=integration --watchAll=false",
+    "test:performance": "react-scripts test --testPathPattern=performance --watchAll=false --testTimeout=60000",
+    "test:security": "react-scripts test --testPathPattern=securityValidation --watchAll=false",
+    "test:raw": "react-scripts test --testPathPattern=formatDetection --watchAll=false",
+    "test:watch": "react-scripts test --watch",
+    "test:debug": "react-scripts --inspect-brk test --runInBand --no-cache",
+    "eject": "react-scripts eject",
+    "lint": "eslint src/ --ext .js,.jsx,.ts,.tsx",
+    "lint:fix": "eslint src/ --ext .js,.jsx,.ts,.tsx --fix",
+    "type-check": "tsc --noEmit",
+    "analyze": "pnpm run build && npx bundlesize",
+    "clean": "rm -rf build node_modules",
+    "dev": "pnpm start"
   },
   "eslintConfig": {
     "extends": [
@@ -33,9 +57,25 @@
     ]
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.1.11",
+    "@radix-ui/react-checkbox": "^1.0.4",
+    "@radix-ui/react-dialog": "^1.0.5",
+    "@radix-ui/react-dropdown-menu": "^2.0.6",
+    "@radix-ui/react-navigation-menu": "^1.1.4",
+    "@radix-ui/react-progress": "^1.0.3",
+    "@radix-ui/react-slot": "^1.0.2",
+    "@radix-ui/react-toast": "^1.1.5",
+    "@radix-ui/react-tooltip": "^1.2.7",
+    "@testing-library/jest-dom": "^6.6.4",
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/user-event": "^14.6.1",
     "autoprefixer": "^10.4.21",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "jest-canvas-mock": "^2.5.2",
+    "jest-environment-jsdom": "^30.0.5",
     "postcss": "^8.5.6",
-    "tailwindcss": "^3.4.17"
+    "tailwind-merge": "^3.3.1",
+    "tailwindcss": "^3.4.17",
+    "tailwindcss-animate": "^1.0.7"
   }
 }

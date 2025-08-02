@@ -88,6 +88,16 @@ const FormatSelector = ({ uploadedFile, disabled = false }) => {
       supportsQuality: false
     },
     { 
+      id: 'raw', 
+      name: 'RAW → JPEG', 
+      description: 'Convert RAW images to JPEG',
+      details: 'Supports CR2, NEF, ARW, DNG, ORF, RW2 and other RAW formats.',
+      icon: '📸',
+      popular: false,
+      supportsQuality: true,
+      isRawConversion: true
+    },
+    { 
       id: 'tiff', 
       name: 'TIFF', 
       description: 'Professional archival quality',
@@ -265,36 +275,61 @@ const FormatSelector = ({ uploadedFile, disabled = false }) => {
             </div>
             
             {/* Custom Quality Slider - Only show for formats that support quality */}
-            {selectedFormat && formatOptions.find(f => f.id === selectedFormat)?.supportsQuality && showAdvanced && (
+            {selectedFormat && selectedFormat.supportsQuality && showAdvanced && (
               <div className="mt-4 pt-3 border-t border-white/20">
                 <div className="flex items-center justify-between mb-3">
-                  <label className="text-sm font-medium text-gray-700">
+                  <label 
+                    htmlFor="quality-slider"
+                    className="text-sm font-medium text-gray-700"
+                  >
                     Custom Quality: {customQuality}%
                   </label>
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() => setUseCustomQuality(!useCustomQuality)}
-                    className={`text-xs ${useCustomQuality ? 'text-orange-600' : 'text-gray-500'}`}
+                    onClick={() => {
+                      setUseCustomQuality(!useCustomQuality);
+                      // When enabling custom quality, automatically use the current slider value
+                      if (!useCustomQuality) {
+                        // User is enabling custom quality mode
+                        console.log('Enabling custom quality mode with value:', customQuality);
+                      }
+                    }}
+                    className={`text-xs ${useCustomQuality ? 'text-orange-600 font-semibold' : 'text-gray-500'}`}
+                    aria-pressed={useCustomQuality}
                   >
                     {useCustomQuality ? 'Using Custom' : 'Use Custom'}
                   </Button>
                 </div>
                 <div className="space-y-2">
                   <Slider
+                    id="quality-slider"
                     value={[customQuality]}
-                    onValueChange={(value) => setCustomQuality(value[0])}
+                    onValueChange={(value) => {
+                      console.log('Slider value changed to:', value[0]);
+                      setCustomQuality(value[0]);
+                      // Automatically enable custom quality when user moves the slider
+                      if (!useCustomQuality) {
+                        setUseCustomQuality(true);
+                      }
+                    }}
                     max={100}
                     min={1}
                     step={1}
                     className="w-full"
-                    disabled={!useCustomQuality}
+                    // Remove disabled prop to make slider always interactive
+                    aria-label={`Quality setting: ${customQuality} percent`}
                   />
                   <div className="flex justify-between text-xs text-gray-500">
                     <span>1% (Smallest)</span>
                     <span>50% (Balanced)</span>
                     <span>100% (Highest)</span>
                   </div>
+                  {!useCustomQuality && (
+                    <p className="text-xs text-blue-600 mt-1">
+                      💡 Move the slider or click "Use Custom" to enable custom quality
+                    </p>
+                  )}
                 </div>
               </div>
             )}

@@ -202,8 +202,8 @@ class ImageProcessingService {
 
       // Automatic download if requested
       if (options.autoDownload !== false) {
-        // Determine actual format from blob type for correct filename
-        const actualFormat = this.getFormatFromMimeType(result.blob.type) || outputFormat;
+        // Use the actual format from the conversion result, fallback to blob type detection
+        const actualFormat = result.format || this.getFormatFromMimeType(result.blob.type) || outputFormat;
         await this.downloadBlob(
           result.blob,
           this.generateFileName(file.name || 'converted', actualFormat),
@@ -211,7 +211,13 @@ class ImageProcessingService {
         );
       }
       
-      return result;
+      return {
+        ...result,
+        originalSize: file.size,
+        originalName: file.name,
+        size: result.blob?.size || result.size || 0,
+        compressionRatio: file.size > 0 && result.blob?.size > 0 ? result.blob.size / file.size : 1
+      };
     }
 
     // Use Web Worker for smaller files

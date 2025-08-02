@@ -4,9 +4,10 @@ import {
   Play, 
   Pause, 
   Square,
-  FileImage,
   RotateCcw,
-  Archive
+  Archive,
+  Shield,
+  AlertTriangle
 } from 'lucide-react';
 import { Card } from './ui/card';
 import { Button } from './ui/button';
@@ -15,6 +16,8 @@ import { useNotifications } from '../store/appStore';
 import { useImageProcessing } from '../hooks/useOptimizedImageProcessing';
 import BatchProgressDisplay from './BatchProgressDisplay';
 import BatchDownloadPanel from './BatchDownloadPanel';
+// SECURITY: Import security validation utilities
+import { validateImageFile, getRateLimitStatus } from '../utils/securityValidation';
 
 // Simple file upload utility for batch processing
 const useFileUpload = () => ({
@@ -64,6 +67,14 @@ const BatchUploadZone = ({
     skipped: 0
   });
 
+  // SECURITY: Security monitoring states
+  const [securityStatus, setSecurityStatus] = useState({
+    threatsBlocked: 0,
+    rateLimitActive: false,
+    lastThreatTime: null
+  });
+  const [rateLimitInfo, setRateLimitInfo] = useState(null);
+
   // Hooks
   const { uploadFile, reset, apiMode } = useFileUpload();
   const { batchConvert } = useImageProcessing();
@@ -76,13 +87,16 @@ const BatchUploadZone = ({
   // Generate unique IDs for accessibility
   const batchZoneId = `${id}-batch-zone`;
   const statusId = `${id}-batch-status`;
+  const instructionsId = `${id}-instructions`;
+  const helpId = `${id}-help`;
   // Queue management handled by the queueManager
 
-  // File validation
-  const validateFile = useCallback((file) => {
+  // SECURITY: Enhanced file validation with comprehensive security checks
+  const validateFile = useCallback(async (file) => {
     const maxSize = 50 * 1024 * 1024; // 50MB
     const validTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/svg+xml'];
     
+    // Basic validation first
     if (file.size > maxSize) {
       return { valid: false, error: 'File size must be less than 50MB' };
     }
@@ -91,12 +105,59 @@ const BatchUploadZone = ({
       return { valid: false, error: 'Please select a valid image file (JPEG, PNG, WebP, GIF, or SVG)' };
     }
     
-    return { valid: true };
+    // SECURITY: Comprehensive security validation
+    try {
+      const validationResult = await validateImageFile(file);
+      
+      if (!validationResult.valid) {
+        // Security threat detected
+        setSecurityStatus(prev => ({
+          ...prev,
+          threatsBlocked: prev.threatsBlocked + 1,
+          lastThreatTime: Date.now()
+        }));
+        
+        return { 
+          valid: false, 
+          error: `Security validation failed: ${validationResult.errors.join('; ')}`,
+          securityThreat: true
+        };
+      }
+      
+      // File passed security validation
+      return { 
+        valid: true, 
+        sanitizedFile: validationResult.file,
+        warnings: validationResult.warnings
+      };
+      
+    } catch (error) {
+      console.error('Security validation error:', error);
+      return { 
+        valid: false, 
+        error: `Security validation failed: ${error.message}`,
+        securityThreat: true
+      };
+    }
   }, []);
 
   // Handle file selection for batch upload
   const handleFileSelect = useCallback(async (files) => {
     const fileList = Array.from(files);
+    
+    // SECURITY: Check rate limits before processing files
+    const rateLimitStatus = getRateLimitStatus();
+    setRateLimitInfo(rateLimitStatus);
+    
+    if (rateLimitStatus.blockedUntil) {
+      const remainingTime = Math.ceil((rateLimitStatus.blockedUntil - Date.now()) / 1000);
+      addNotification({
+        type: 'error',
+        title: 'Rate Limit Active',
+        message: `Upload temporarily blocked. Please wait ${remainingTime} seconds before trying again.`,
+      });
+      return;
+    }
     
     // Check file limit
     if (fileList.length > maxFiles) {
@@ -110,34 +171,72 @@ const BatchUploadZone = ({
 
     const validFiles = [];
     const errors = [];
+    const securityThreats = [];
 
-    // Validate each file
-    fileList.forEach((file, index) => {
-      const validation = validateFile(file);
-      if (validation.valid) {
-        validFiles.push({
-          id: `file-${Date.now()}-${index}`,
-          file,
-          status: 'pending',
-          progress: 0,
-          error: null,
-          result: null
-        });
-      } else {
-        errors.push(`${file.name}: ${validation.error}`);
+    // SECURITY: Validate each file with comprehensive security checks
+    for (let index = 0; index < fileList.length; index++) {
+      const file = fileList[index];
+      
+      try {
+        const validation = await validateFile(file);
+        
+        if (validation.valid) {
+          validFiles.push({
+            id: `file-${Date.now()}-${index}`,
+            file: validation.sanitizedFile || file,
+            originalFile: file,
+            status: 'pending',
+            progress: 0,
+            error: null,
+            result: null,
+            securityWarnings: validation.warnings || []
+          });
+        } else {
+          if (validation.securityThreat) {
+            securityThreats.push(`${file.name}: ${validation.error}`);
+          } else {
+            errors.push(`${file.name}: ${validation.error}`);
+          }
+        }
+      } catch (error) {
+        console.error(`Validation error for ${file.name}:`, error);
+        errors.push(`${file.name}: Validation failed - ${error.message}`);
       }
-    });
+    }
+
+    // SECURITY: Show security threats with high priority
+    if (securityThreats.length > 0) {
+      addNotification({
+        type: 'error',
+        title: 'Security Threats Blocked',
+        message: `${securityThreats.length} potentially malicious files were blocked. ${securityThreats.slice(0, 2).join('. ')}${securityThreats.length > 2 ? '...' : ''}`,
+      });
+      
+      // Update security status
+      setSecurityStatus(prev => ({
+        ...prev,
+        threatsBlocked: prev.threatsBlocked + securityThreats.length,
+        lastThreatTime: Date.now()
+      }));
+    }
 
     // Show validation errors
     if (errors.length > 0) {
       addNotification({
-        type: 'error',
+        type: 'warning',
         title: 'File Validation Errors',
         message: `${errors.length} files were rejected. ${errors.slice(0, 3).join('. ')}${errors.length > 3 ? '...' : ''}`,
       });
     }
 
     if (validFiles.length === 0) {
+      if (securityThreats.length > 0) {
+        addNotification({
+          type: 'info',
+          title: 'All Files Blocked',
+          message: 'All selected files were blocked due to security concerns. Please try uploading different files.',
+        });
+      }
       return;
     }
 
@@ -466,13 +565,34 @@ const BatchUploadZone = ({
       <div className="p-6 sm:p-8 lg:p-10">
         {/* Header */}
         <div className="flex flex-col items-center text-center space-y-6 mb-8">
-          {/* Mode Indicator */}
-          {apiMode === 'offline' && (
-            <div className="flex items-center space-x-2 px-3 py-1 bg-orange-100/50 border border-orange-200 rounded-full text-xs text-orange-700">
-              <div className="w-2 h-2 bg-orange-500 rounded-full animate-pulse"></div>
-              <span>Offline Mode - Local Processing</span>
+          {/* Mode and Security Indicators */}
+          <div className="flex flex-wrap items-center justify-center gap-3">
+            {apiMode === 'offline' && (
+              <div className="flex items-center space-x-2 px-3 py-1 bg-orange-100/50 border border-orange-200 rounded-full text-xs text-orange-700">
+                <div className="w-2 h-2 bg-orange-500 rounded-full animate-pulse"></div>
+                <span>Offline Mode - Local Processing</span>
+              </div>
+            )}
+            
+            {/* SECURITY: Security status indicator */}
+            <div className="flex items-center space-x-2 px-3 py-1 bg-green-100/50 border border-green-200 rounded-full text-xs text-green-700">
+              <Shield className="w-3 h-3" />
+              <span>Security Active</span>
             </div>
-          )}
+            
+            {securityStatus.threatsBlocked > 0 && (
+              <div className="flex items-center space-x-2 px-3 py-1 bg-red-100/50 border border-red-200 rounded-full text-xs text-red-700">
+                <AlertTriangle className="w-3 h-3" />
+                <span>{securityStatus.threatsBlocked} threats blocked</span>
+              </div>
+            )}
+            
+            {rateLimitInfo && (
+              <div className="flex items-center space-x-2 px-3 py-1 bg-blue-100/50 border border-blue-200 rounded-full text-xs text-blue-700">
+                <span>Rate: {rateLimitInfo.uploadsThisMinute}/{rateLimitInfo.limits.maxPerMinute}/min</span>
+              </div>
+            )}
+          </div>
 
           {/* Upload Icon */}
           <div className="relative">
@@ -519,7 +639,7 @@ const BatchUploadZone = ({
         {/* Drop Zone */}
         <div className="w-full max-w-4xl mx-auto space-y-6">
           <div
-            className={`relative w-full h-40 border-2 border-dashed rounded-2xl flex items-center justify-center transition-all duration-300 cursor-pointer backdrop-blur-sm ${
+            className={`relative w-full h-48 border-2 border-dashed rounded-2xl transition-all duration-300 backdrop-blur-sm ${
               dragActive 
                 ? 'border-orange-500/80 bg-orange-50/60 scale-[1.01] shadow-lg' 
                 : 'border-orange-400/50 bg-white/20 hover:border-orange-500/70 hover:bg-white/25 hover:shadow-md'
@@ -528,15 +648,6 @@ const BatchUploadZone = ({
             onDragLeave={handleDragLeave}
             onDragOver={handleDragOver}
             onDrop={handleDrop}
-            role="button"
-            aria-label={`Batch upload zone. Drop multiple files or click to select. Maximum ${maxFiles} files.`}
-            tabIndex={isProcessing ? -1 : 0}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                document.getElementById(batchZoneId)?.click();
-              }
-            }}
           >
             <input
               id={batchZoneId}
@@ -546,22 +657,73 @@ const BatchUploadZone = ({
               multiple
               onChange={handleInputChange}
               disabled={isProcessing}
+              aria-describedby={`${instructionsId} ${statusId} ${helpId}`}
             />
             
-            <div className="flex flex-col items-center space-y-4 px-6">
-              <div className="flex items-center space-x-4">
-                <FileImage className="w-12 h-12 text-slate-600" />
-                <div className="text-center">
-                  <span className="text-slate-800 text-lg font-bold block" 
-                        style={{ fontFamily: 'Inter, sans-serif', textShadow: '0 1px 2px rgba(255, 255, 255, 0.8)' }}>
-                    {dragActive ? 'Drop your images here' : 'Select Multiple Images'}
-                  </span>
-                  <span className="text-sm text-slate-600 font-medium">
-                    Drag & drop or click to browse • JPEG, PNG, WebP, GIF, SVG
-                  </span>
+            {/* Clickable label that covers the entire drop zone */}
+            <label
+              htmlFor={batchZoneId}
+              className="absolute inset-0 flex items-center justify-center cursor-pointer rounded-2xl focus-within:ring-2 focus-within:ring-orange-500 focus-within:ring-opacity-75 focus-within:outline-none"
+              role="button"
+              aria-label={`Batch upload zone. Drop multiple files or click to select. Maximum ${maxFiles} files.`}
+              aria-describedby={`${instructionsId} ${statusId} ${helpId}`}
+              tabIndex={isProcessing ? -1 : 0}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  document.getElementById(batchZoneId)?.click();
+                }
+              }}
+            >
+              <div className="flex flex-col items-center space-y-6 px-6 py-8 text-center w-full">
+                {/* Clickable Upload Icon */}
+                <div className="relative group">
+                  <div className="absolute -inset-3 rounded-full border border-orange-200/30 animate-gentle-breathe opacity-70 group-hover:opacity-100 transition-opacity" />
+                  <div 
+                    className="relative p-6 rounded-full shadow-lg transition-all duration-300 ease-out group-hover:shadow-xl group-hover:scale-105 cursor-pointer"
+                    style={{
+                      background: isProcessing 
+                        ? 'linear-gradient(135deg, #64748b, #94a3b8)' 
+                        : 'linear-gradient(135deg, #f97316, #fb923c, #ea580c)'
+                    }}
+                  >
+                    {isProcessing ? (
+                      <Loader2 className="w-8 h-8 text-white animate-spin" />
+                    ) : (
+                      <Archive className="w-8 h-8 text-white group-hover:scale-110 transition-transform" />
+                    )}
+                  </div>
+                </div>
+                
+                {/* Text Content */}
+                <div className="space-y-3">
+                  <div className="space-y-2">
+                    <span 
+                      id={instructionsId}
+                      className="text-slate-800 text-xl font-bold block" 
+                      style={{ fontFamily: 'Inter, sans-serif', textShadow: '0 1px 2px rgba(255, 255, 255, 0.8)' }}
+                    >
+                      {dragActive ? 'Drop your images here' : 'Select Multiple Images'}
+                    </span>
+                    <span 
+                      id={helpId}
+                      className="text-sm text-slate-600 font-medium block"
+                    >
+                      Drag & drop or click anywhere to browse
+                    </span>
+                  </div>
+                  
+                  <div className="space-y-1">
+                    <span className="text-sm text-slate-700 font-semibold block" style={{ textShadow: '0 1px 1px rgba(255, 255, 255, 0.6)' }}>
+                      Supports: JPEG, PNG, WebP, GIF, SVG files
+                    </span>
+                    <span className="text-xs text-slate-600 font-medium block" style={{ textShadow: '0 1px 1px rgba(255, 255, 255, 0.6)' }}>
+                      Maximum {maxFiles} files • 50MB each
+                    </span>
+                  </div>
                 </div>
               </div>
-            </div>
+            </label>
           </div>
 
           {/* Batch Controls */}

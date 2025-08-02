@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ImageMagick WASM Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .test-section {
+            margin: 20px 0;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+        }
+        .success { color: green; }
+        .error { color: red; }
+        .loading { color: blue; }
+        button {
+            background: #007cba;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background: #005a8b;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        #fileInput {
+            margin: 10px 0;
+        }
+        #results {
+            margin-top: 20px;
+        }
+        .result-item {
+            padding: 10px;
+            margin: 5px 0;
+            border-radius: 4px;
+            background: #f5f5f5;
+        }
+    </style>
+</head>
+<body>
+    <h1>ImageMagick WASM Integration Test</h1>
+    
+    <div class="test-section">
+        <h2>Service Initialization Test</h2>
+        <p id="initStatus" class="loading">Initializing ImageMagick service...</p>
+        <button id="testInit" onclick="testInitialization()">Test Initialization</button>
+    </div>
+    
+    <div class="test-section">
+        <h2>Format Support Test</h2>
+        <p id="formatStatus">Click to test format support</p>
+        <button id="testFormats" onclick="testFormatSupport()">Test Format Support</button>
+        <div id="formatResults"></div>
+    </div>
+    
+    <div class="test-section">
+        <h2>AVIF Conversion Test</h2>
+        <p>Select an image to test AVIF conversion:</p>
+        <input type="file" id="fileInput" accept="image/*">
+        <button id="testConversion" onclick="testAVIFConversion()" disabled>Test AVIF Conversion</button>
+        <div id="conversionResults"></div>
+    </div>
+    
+    <div id="results"></div>
+
+    <script type="module">
+        // Import the ImageMagick service
+        import imageMagickService from '/src/services/imageMagickService.js';
+        
+        // Make service available globally for testing
+        window.imageMagickService = imageMagickService;
+        
+        // Test initialization on page load
+        testInitialization();
+        
+        // Enable file input when a file is selected
+        document.getElementById('fileInput').addEventListener('change', function(e) {
+            const button = document.getElementById('testConversion');
+            button.disabled = !e.target.files.length;
+        });
+        
+        async function testInitialization() {
+            const statusEl = document.getElementById('initStatus');
+            const buttonEl = document.getElementById('testInit');
+            
+            try {
+                buttonEl.disabled = true;
+                statusEl.textContent = 'Testing ImageMagick service initialization...';
+                statusEl.className = 'loading';
+                
+                // Check if service is ready
+                const isReady = imageMagickService.isReady();
+                const isFallback = imageMagickService.isFallbackMode();
+                
+                if (isReady && !isFallback) {
+                    statusEl.textContent = '✅ ImageMagick WASM service is initialized and ready!';
+                    statusEl.className = 'success';
+                } else if (isReady && isFallback) {
+                    statusEl.textContent = '⚠️ ImageMagick service is in fallback mode (using Canvas API)';
+                    statusEl.className = 'error';
+                } else {
+                    statusEl.textContent = '❌ ImageMagick service is not ready';
+                    statusEl.className = 'error';
+                }
+                
+                // Get capabilities
+                try {
+                    const capabilities = await imageMagickService.getCapabilities();
+                    console.log('ImageMagick capabilities:', capabilities);
+                    
+                    const capabilityInfo = document.createElement('div');
+                    capabilityInfo.innerHTML = `<pre>${JSON.stringify(capabilities, null, 2)}</pre>`;
+                    statusEl.appendChild(capabilityInfo);
+                } catch (capError) {
+                    console.warn('Could not get capabilities:', capError);
+                }
+                
+            } catch (error) {
+                console.error('Initialization test failed:', error);
+                statusEl.textContent = `❌ Initialization test failed: ${error.message}`;
+                statusEl.className = 'error';
+            } finally {
+                buttonEl.disabled = false;
+            }
+        }
+        
+        async function testFormatSupport() {
+            const statusEl = document.getElementById('formatStatus');
+            const resultsEl = document.getElementById('formatResults');
+            const buttonEl = document.getElementById('testFormats');
+            
+            try {
+                buttonEl.disabled = true;
+                statusEl.textContent = 'Testing format support...';
+                statusEl.className = 'loading';
+                
+                const supportedFormats = imageMagickService.getSupportedFormats();
+                const supportsAVIF = imageMagickService.supportsAVIF();
+                const supportsHEIC = imageMagickService.supportsHEIC();
+                const supportsRAW = imageMagickService.supportsRAW();
+                
+                statusEl.textContent = '✅ Format support test completed';
+                statusEl.className = 'success';
+                
+                resultsEl.innerHTML = `
+                    <div class="result-item">
+                        <strong>Supported Formats:</strong> ${supportedFormats.join(', ')}
+                    </div>
+                    <div class="result-item">
+                        <strong>AVIF Support:</strong> ${supportsAVIF ? '✅ Yes' : '❌ No'}
+                    </div>
+                    <div class="result-item">
+                        <strong>HEIC Support:</strong> ${supportsHEIC ? '✅ Yes' : '❌ No'}
+                    </div>
+                    <div class="result-item">
+                        <strong>RAW Support:</strong> ${supportsRAW ? '✅ Yes' : '❌ No'}
+                    </div>
+                `;
+                
+            } catch (error) {
+                console.error('Format support test failed:', error);
+                statusEl.textContent = `❌ Format support test failed: ${error.message}`;
+                statusEl.className = 'error';
+            } finally {
+                buttonEl.disabled = false;
+            }
+        }
+        
+        async function testAVIFConversion() {
+            const fileInput = document.getElementById('fileInput');
+            const resultsEl = document.getElementById('conversionResults');
+            const buttonEl = document.getElementById('testConversion');
+            
+            if (!fileInput.files.length) {
+                resultsEl.innerHTML = '<div class="result-item error">Please select a file first</div>';
+                return;
+            }
+            
+            const file = fileInput.files[0];
+            
+            try {
+                buttonEl.disabled = true;
+                resultsEl.innerHTML = '<div class="result-item loading">Converting to AVIF...</div>';
+                
+                const startTime = performance.now();
+                
+                const result = await imageMagickService.convertImage(
+                    file,
+                    'avif',
+                    { quality: 'medium' },
+                    (progress, message) => {
+                        resultsEl.innerHTML = `<div class="result-item loading">Converting: ${progress}% - ${message}</div>`;
+                    }
+                );
+                
+                const endTime = performance.now();
+                const processingTime = Math.round(endTime - startTime);
+                
+                // Create download link
+                const downloadUrl = URL.createObjectURL(result.blob);
+                const originalSize = (file.size / 1024).toFixed(1);
+                const convertedSize = (result.blob.size / 1024).toFixed(1);
+                const compressionRatio = ((result.blob.size / file.size) * 100).toFixed(1);
+                
+                resultsEl.innerHTML = `
+                    <div class="result-item success">
+                        <strong>✅ AVIF Conversion Successful!</strong><br>
+                        Original size: ${originalSize} KB<br>
+                        Converted size: ${convertedSize} KB<br>
+                        Compression ratio: ${compressionRatio}%<br>
+                        Processing time: ${processingTime}ms<br>
+                        Method: ${result.method || 'unknown'}<br>
+                        <a href="${downloadUrl}" download="converted.avif">Download AVIF</a>
+                    </div>
+                `;
+                
+            } catch (error) {
+                console.error('AVIF conversion test failed:', error);
+                resultsEl.innerHTML = `<div class="result-item error">❌ AVIF conversion failed: ${error.message}</div>`;
+            } finally {
+                buttonEl.disabled = false;
+            }
+        }
+        
+        // Make functions global for onclick handlers
+        window.testInitialization = testInitialization;
+        window.testFormatSupport = testFormatSupport;
+        window.testAVIFConversion = testAVIFConversion;
+    </script>
+</body>
+</html>
