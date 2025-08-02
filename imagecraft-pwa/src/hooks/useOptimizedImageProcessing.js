@@ -16,14 +16,22 @@ export function useImageProcessing() {
   const [result, setResult] = useState(null);
   const [qualityPresets, setQualityPresets] = useState(null);
   const [supportedFormats, setSupportedFormats] = useState(null);
+  const [isInitialized, setIsInitialized] = useState(false);
   
   const { addNotification } = useNotifications();
   const serviceRef = useRef(null);
   const abortControllerRef = useRef(null);
   const rawDetectorRef = useRef(null);
+  const initializationRef = useRef(false);
 
-  // Initialize service
+  // Initialize service - only run once
   useEffect(() => {
+    // Prevent multiple initialization attempts
+    if (initializationRef.current) {
+      return;
+    }
+    initializationRef.current = true;
+
     const initService = async () => {
       try {
         console.log('useImageProcessing: Getting service instance...');
@@ -56,26 +64,46 @@ export function useImageProcessing() {
         
         setQualityPresets(presets);
         setSupportedFormats(formats);
+        setIsInitialized(true);
         
         console.log('useImageProcessing: Initialization complete');
         
       } catch (error) {
         console.error('Failed to initialize image processing service:', error);
         setError(error);
+        setIsInitialized(false);
         
-        addNotification({
+        // Use a stable function reference for notifications in error case
+        const notificationPayload = {
           type: 'error',
           title: 'Service Initialization Failed',
           message: `Image processing service could not be started: ${error.message}`,
           duration: 10000
-        });
+        };
+        
+        // Schedule notification to avoid dependency issues
+        setTimeout(() => {
+          try {
+            addNotification(notificationPayload);
+          } catch (notifError) {
+            console.error('Failed to show initialization error notification:', notifError);
+          }
+        }, 0);
       }
     };
 
     initService();
-  }, [addNotification]);
 
-  // Progress callback
+    // Cleanup function
+    return () => {
+      initializationRef.current = false;
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
+  }, []); // Empty dependency array - only run once
+
+  // Progress callback - stable reference
   const handleProgress = useCallback((progress, message) => {
     setProgress(progress);
     setProgressMessage(message || '');
@@ -121,13 +149,15 @@ export function useImageProcessing() {
           { name: 'RAW' };
         setProgressMessage(`Processing ${rawFormatInfo.name} file...`);
         
-        // Add RAW conversion notification
-        addNotification({
-          type: 'info',
-          title: 'RAW File Detected',
-          message: `Processing ${rawFormatInfo.name} file. This may take longer than standard image formats.`,
-          duration: 6000
-        });
+        // Add RAW conversion notification - avoid dependency issues
+        setTimeout(() => {
+          addNotification({
+            type: 'info',
+            title: 'RAW File Detected',
+            message: `Processing ${rawFormatInfo.name} file. This may take longer than standard image formats.`,
+            duration: 6000
+          });
+        }, 0);
       } else {
         // Validate that RAW conversion isn't selected for non-RAW files
         if (outputFormat.toLowerCase() === 'raw') {
@@ -150,12 +180,15 @@ export function useImageProcessing() {
         ? `${result.originalRawFormat?.toUpperCase() || 'RAW'} file converted to ${result.actualFormat?.toUpperCase() || outputFormat.toUpperCase()} and downloaded.`
         : `${file.name} converted to ${result.actualFormat?.toUpperCase() || outputFormat.toUpperCase()} and downloaded automatically.`;
 
-      addNotification({
-        type: 'success',
-        title: result.isRawConversion ? 'RAW Conversion Complete!' : 'Image Converted!',
-        message: successMessage,
-        duration: result.isRawConversion ? 7000 : 5000
-      });
+      // Success notification - avoid dependency issues
+      setTimeout(() => {
+        addNotification({
+          type: 'success',
+          title: result.isRawConversion ? 'RAW Conversion Complete!' : 'Image Converted!',
+          message: successMessage,
+          duration: result.isRawConversion ? 7000 : 5000
+        });
+      }, 0);
 
       return result;
     } catch (error) {
@@ -165,19 +198,22 @@ export function useImageProcessing() {
       // Enhanced error handling for RAW-specific issues
       const isRawError = error.message.includes('RAW') || error.message.includes('raw');
       
-      addNotification({
-        type: 'error',
-        title: isRawError ? 'RAW Conversion Failed' : 'Conversion Failed',
-        message: error.message || 'An error occurred during image conversion.',
-        duration: isRawError ? 10000 : 8000
-      });
+      // Error notification - avoid dependency issues
+      setTimeout(() => {
+        addNotification({
+          type: 'error',
+          title: isRawError ? 'RAW Conversion Failed' : 'Conversion Failed',
+          message: error.message || 'An error occurred during image conversion.',
+          duration: isRawError ? 10000 : 8000
+        });
+      }, 0);
       
       throw error;
     } finally {
       setIsProcessing(false);
       abortControllerRef.current = null;
     }
-  }, [handleProgress, addNotification]);
+  }, [handleProgress]);
 
   // Apply filter to image
   const applyFilter = useCallback(async (file, filterType, intensity = 1, options = {}) => {
@@ -202,30 +238,36 @@ export function useImageProcessing() {
       setProgress(100);
       setProgressMessage('Filter applied!');
 
-      addNotification({
-        type: 'success',
-        title: 'Filter Applied!',
-        message: `${filterType} filter applied to ${file.name} and downloaded.`,
-        duration: 5000
-      });
+      // Success notification - avoid dependency issues
+      setTimeout(() => {
+        addNotification({
+          type: 'success',
+          title: 'Filter Applied!',
+          message: `${filterType} filter applied to ${file.name} and downloaded.`,
+          duration: 5000
+        });
+      }, 0);
 
       return result;
     } catch (error) {
       setError(error);
       setProgressMessage('Filter application failed');
       
-      addNotification({
-        type: 'error',
-        title: 'Filter Failed',
-        message: error.message || 'An error occurred while applying the filter.',
-        duration: 8000
-      });
+      // Error notification - avoid dependency issues
+      setTimeout(() => {
+        addNotification({
+          type: 'error',
+          title: 'Filter Failed',
+          message: error.message || 'An error occurred while applying the filter.',
+          duration: 8000
+        });
+      }, 0);
       
       throw error;
     } finally {
       setIsProcessing(false);
     }
-  }, [handleProgress, addNotification]);
+  }, [handleProgress]);
 
   // Batch convert multiple images
   const batchConvert = useCallback(async (files, outputFormat, quality = 'medium', options = {}) => {
@@ -252,40 +294,45 @@ export function useImageProcessing() {
       setProgress(100);
       setProgressMessage(`Batch conversion complete! ${batchResult.successCount}/${batchResult.totalCount} files processed.`);
 
-      // Batch completion notification
-      if (batchResult.errorCount === 0) {
-        addNotification({
-          type: 'success',
-          title: 'Batch Conversion Complete!',
-          message: `All ${batchResult.successCount} files converted successfully and downloaded.`,
-          duration: 6000
-        });
-      } else {
-        addNotification({
-          type: 'warning',
-          title: 'Batch Conversion Finished',
-          message: `${batchResult.successCount} files converted, ${batchResult.errorCount} failed. Check results for details.`,
-          duration: 8000
-        });
-      }
+      // Batch completion notification - avoid dependency issues
+      setTimeout(() => {
+        if (batchResult.errorCount === 0) {
+          addNotification({
+            type: 'success',
+            title: 'Batch Conversion Complete!',
+            message: `All ${batchResult.successCount} files converted successfully and downloaded.`,
+            duration: 6000
+          });
+        } else {
+          addNotification({
+            type: 'warning',
+            title: 'Batch Conversion Finished',
+            message: `${batchResult.successCount} files converted, ${batchResult.errorCount} failed. Check results for details.`,
+            duration: 8000
+          });
+        }
+      }, 0);
 
       return batchResult;
     } catch (error) {
       setError(error);
       setProgressMessage('Batch conversion failed');
       
-      addNotification({
-        type: 'error',
-        title: 'Batch Conversion Failed',
-        message: error.message || 'An error occurred during batch conversion.',
-        duration: 8000
-      });
+      // Error notification - avoid dependency issues
+      setTimeout(() => {
+        addNotification({
+          type: 'error',
+          title: 'Batch Conversion Failed',
+          message: error.message || 'An error occurred during batch conversion.',
+          duration: 8000
+        });
+      }, 0);
       
       throw error;
     } finally {
       setIsProcessing(false);
     }
-  }, [handleProgress, addNotification]);
+  }, [handleProgress]);
 
   // Estimate output file size
   const estimateOutputSize = useCallback((inputSize, inputFormat, outputFormat, quality) => {
@@ -360,14 +407,17 @@ export function useImageProcessing() {
       setIsProcessing(false);
       setProgressMessage('Cancelled');
       
-      addNotification({
-        type: 'info',
-        title: 'Operation Cancelled',
-        message: 'Image processing was cancelled by user.',
-        duration: 3000
-      });
+      // Notification - avoid dependency issues
+      setTimeout(() => {
+        addNotification({
+          type: 'info',
+          title: 'Operation Cancelled',
+          message: 'Image processing was cancelled by user.',
+          duration: 3000
+        });
+      }, 0);
     }
-  }, [addNotification]);
+  }, []);
 
   return {
     // State
@@ -394,9 +444,10 @@ export function useImageProcessing() {
     isRawFile,
     
     // Convenience getters
-    isReady: !!serviceRef.current && !!qualityPresets && !!supportedFormats && !!rawDetectorRef.current,
+    isReady: isInitialized && !!serviceRef.current && !!qualityPresets && !!supportedFormats && !!rawDetectorRef.current,
     hasError: !!error,
     isComplete: !isProcessing && progress === 100 && !error,
+    isInitialized,
   };
 }
 
