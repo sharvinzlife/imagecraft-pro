@@ -66,22 +66,18 @@ class ServiceInitializer {
     const service = this.services.imageProcessing;
     if (!service) return false;
 
-    // Poll until service is initialized
-    const maxRetries = 50; // 10 seconds with 200ms intervals
-    let retries = 0;
-
-    while (retries < maxRetries) {
-      if (service.isInitialized) {
-        console.log('ServiceInitializer: Image processing service is ready');
-        return true;
-      }
+    try {
+      // Initialize the service explicitly (new initialization pattern)
+      console.log('ServiceInitializer: Initializing image processing service...');
+      await service.initialize();
       
-      await new Promise(resolve => setTimeout(resolve, 200));
-      retries++;
+      console.log('ServiceInitializer: Image processing service is ready');
+      return true;
+    } catch (error) {
+      console.warn('ServiceInitializer: Image processing service initialization failed:', error);
+      // Don't fail - allow fallback mode
+      return true;
     }
-
-    console.warn('ServiceInitializer: Image processing service initialization timeout');
-    return false;
   }
 
   /**
