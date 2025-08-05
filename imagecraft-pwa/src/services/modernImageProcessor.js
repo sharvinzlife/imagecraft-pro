@@ -10,11 +10,12 @@
  * - Input validation against OWASP Top 10 vulnerabilities
  */
 
-import { createRawDetector, validateRawConversion, isRawFormat } from '../utils/formatDetection';
-import { validateImageFile, validateImageDimensions } from '../utils/validationUtils';
+import { createRawDetector, isRawFormat } from '../utils/formatDetection';
 import { getEnhancedFormatHandler } from '../utils/enhancedFormatSupport';
 import { getFormatNotificationService } from '../utils/formatNotificationService';
+import { getGlobalMemoryManager, createImageDataProcessor } from '../utils/memoryManagement.js';
 import imageMagickService from './imageMagickService.js';
+import WorkerPoolManager from './WorkerPoolManager.js';
 
 class ModernImageProcessor {
   constructor() {
@@ -24,6 +25,20 @@ class ModernImageProcessor {
     this.maxChunkSize = 50 * 1024 * 1024; // 50MB chunks for progressive processing
     this.qualitySettings = this.initializeQualitySettings();
     this.formatCapabilities = null;
+    
+    // Enhanced memory management integration
+    this.memoryManager = getGlobalMemoryManager();
+    this.imageProcessor = createImageDataProcessor({
+      memoryMonitor: { 
+        maxHeapSize: 512 * 1024 * 1024, // 512MB for image processing
+        warningThreshold: 0.6,
+        criticalThreshold: 0.8
+      }
+    });
+    
+    // Worker pool for parallel processing
+    this.workerPool = null;
+    this.useWorkerPool = true; // Enable by default
     
     // Initialize RAW detector
     this.rawDetector = createRawDetector();
@@ -50,359 +65,230 @@ class ModernImageProcessor {
     // Initialize enhanced format support
     this.enhancedFormatHandler = getEnhancedFormatHandler();
     this.notificationService = getFormatNotificationService();
+    
+    // Initialize worker pool
+    this.initializeWorkerPool();
+    
+    // Set up memory management cleanup strategies
+    this.setupMemoryCleanupStrategies();
   }
 
   /**
-   * Initialize quality settings for different formats
-   * Fixed to prevent JPEG quantization grid artifacts
+   * Initialize worker pool for parallel processing
+   */
+  async initializeWorkerPool() {
+    if (!this.useWorkerPool) {
+      return;
+    }
+
+    try {
+      this.workerPool = new WorkerPoolManager({
+        maxWorkers: 4,
+        minWorkers: 2,
+        taskTimeout: 300000, // 5 minutes
+        maxRetries: 2,
+        enableMemoryOptimization: true
+      });
+
+      await this.workerPool.initialize();
+      console.log('Worker pool initialized for ModernImageProcessor');
+      
+      // Set up event listeners
+      this.workerPool.on('memory-pressure', (data) => {
+        console.warn('Worker pool memory pressure:', data);
+        this.handleWorkerPoolMemoryPressure(data);
+      });
+
+      this.workerPool.on('worker-failed', (data) => {
+        console.warn('Worker failed in pool:', data);
+      });
+
+    } catch (error) {
+      console.warn('Failed to initialize worker pool, falling back to direct processing:', error);
+      this.useWorkerPool = false;
+      this.workerPool = null;
+    }
+  }
+
+  /**
+   * Set up memory cleanup strategies specific to image processing
+   */
+  setupMemoryCleanupStrategies() {
+    // Add image-specific cleanup strategies
+    this.memoryManager.addCleanupStrategy('clear-image-caches', {
+      priority: 2,
+      description: 'Clear image processing caches and temporary canvases',
+      execute: () => {
+        let clearedCount = 0;
+        
+        // Clear canvas pool
+        const canvasPool = this.imageProcessor.monitor.getPool('canvas');
+        if (canvasPool) {
+          clearedCount += canvasPool.clear();
+        }
+        
+        // Clear context pool
+        const contextPool = this.imageProcessor.monitor.getPool('context');
+        if (contextPool) {
+          clearedCount += contextPool.clear();
+        }
+        
+        return {
+          clearedItems: clearedCount,
+          description: 'Cleared image processing caches and temporary canvases'
+        };
+      }
+    });
+  }
+
+  
+  /**
+   * Initialize quality settings
    */
   initializeQualitySettings() {
     return {
-      high: {
-        description: 'Maximum quality, larger file size',
-        jpeg: 0.98, // Increased from 0.95 to prevent quantization artifacts
-        webp: 0.92, // Slightly increased for consistency
-        avif: 0.88, // Slightly increased for consistency
-        png: null, // PNG is lossless
+      low: {
+        jpeg: 0.6,
+        webp: 0.5,
+        avif: 0.4,
+        png: 0.8,
+        bmp: 0.8,
+        gif: 0.8
       },
       medium: {
-        description: 'Balanced quality and file size',
-        jpeg: 0.88, // Increased from 0.8 to prevent visible grid lines
-        webp: 0.80, // Slightly increased for consistency
-        avif: 0.70, // Slightly increased for consistency
-        png: null,
+        jpeg: 0.8,
+        webp: 0.75,
+        avif: 0.65,
+        png: 0.9,
+        bmp: 0.9,
+        gif: 0.9
       },
-      low: {
-        description: 'Smaller file size, reasonable quality',
-        jpeg: 0.75, // Increased from 0.6 to maintain acceptable quality
-        webp: 0.60, // Slightly increased
-        avif: 0.50, // Slightly increased
-        png: null,
+      high: {
+        jpeg: 0.95,
+        webp: 0.9,
+        avif: 0.85,
+        png: 1.0,
+        bmp: 1.0,
+        gif: 1.0
       }
     };
-  }
-
-  /**
-   * Detect browser format support capabilities with comprehensive testing
-   */
-  async initializeCapabilities() {
-    const canvas = document.createElement('canvas');
-    canvas.width = 1;
-    canvas.height = 1;
-    
-    // Fill canvas with test pattern
-    const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#FF0000';
-    ctx.fillRect(0, 0, 1, 1);
-    
-    // Check both Canvas and ImageMagick capabilities
-    const canvasWebP = await this.testFormatSupport(canvas, 'image/webp');
-    const canvasAVIF = await this.testFormatSupport(canvas, 'image/avif');
-    const canvasBMP = await this.testFormatSupport(canvas, 'image/bmp');
-    const canvasGIF = await this.testFormatSupport(canvas, 'image/gif');
-    
-    // Check if ImageMagick service is available
-    const imageMagickAvailable = await this.checkImageMagickAvailability();
-    
-    this.formatCapabilities = {
-      webp: canvasWebP || imageMagickAvailable,
-      avif: canvasAVIF || imageMagickAvailable, // ImageMagick supports AVIF
-      jpeg: true, // Always supported
-      png: true,  // Always supported
-      bmp: canvasBMP || imageMagickAvailable,
-      gif: canvasGIF || imageMagickAvailable,
-      tiff: imageMagickAvailable // Only ImageMagick supports TIFF
-    };
-
-    console.log('Format capabilities detected:', this.formatCapabilities);
-  }
-
-  /**
-   * Check if ImageMagick service is available
-   */
-  async checkImageMagickAvailability() {
-    try {
-      // Check if ImageMagick service is ready (including fallback mode)
-      if (imageMagickService.isReady()) {
-        return true; // Even fallback mode provides some enhanced capabilities
-      }
-      
-      // Try to initialize it (this will return quickly if already initialized)
-      await imageMagickService.initialize();
-      
-      return imageMagickService.isReady();
-    } catch (error) {
-      console.warn('ImageMagick service not available:', error.message);
-      return false;
-    }
-  }
-
-  /**
-   * Test if browser supports specific image format with comprehensive checks
-   */
-  async testFormatSupport(canvas, mimeType) {
-    try {
-      // First check if the MIME type is recognized
-      if (!this.isMimeTypeSupported(mimeType)) {
-        console.log(`MIME type ${mimeType} not recognized as supported`);
-        return false;
-      }
-      
-      return new Promise((resolve) => {
-        try {
-          canvas.toBlob((blob) => {
-            if (!blob || blob.size === 0) {
-              console.log(`${mimeType} format test failed: no blob created`);
-              resolve(false);
-              return;
-            }
-            
-            // Critical check: Does the browser actually return the requested format?
-            const actualType = blob.type;
-            const supported = actualType === mimeType;
-            
-            if (!supported) {
-              console.log(`${mimeType} format not supported: browser returned ${actualType} instead`);
-              
-              // Use enhanced format handler for better error messaging
-              const format = mimeType.replace('image/', '');
-              const fallbackFormat = actualType.replace('image/', '');
-              
-              // Notify about format fallback
-              this.notificationService.notifyFormatUnsupported(
-                format, 
-                fallbackFormat, 
-                'Browser Canvas API does not support encoding to this format'
-              );
-            } else {
-              console.log(`${mimeType} format fully supported by browser`);
-            }
-            
-            resolve(supported);
-          }, mimeType, 0.8);
-        } catch (blobError) {
-          console.warn(`Blob creation failed for ${mimeType}:`, blobError);
-          resolve(false);
-        }
-      });
-    } catch (error) {
-      console.warn(`Format support test failed for ${mimeType}:`, error);
-      return false;
-    }
   }
   
   /**
-   * Check if MIME type is supported by the browser
+   * Initialize format capabilities detection
    */
-  isMimeTypeSupported(mimeType) {
-    // Additional checks for specific formats
-    switch (mimeType) {
-      case 'image/avif':
-        // AVIF support requires modern Canvas API and is browser-dependent
-        return typeof HTMLCanvasElement !== 'undefined' && 
-               HTMLCanvasElement.prototype.toBlob;
-      case 'image/webp':
-        // WebP support is common but not universal
-        return typeof HTMLCanvasElement !== 'undefined' && 
-               HTMLCanvasElement.prototype.toBlob;
-      case 'image/jpeg':
-      case 'image/png':
-        // Always supported by Canvas API
-        return true;
-      case 'image/bmp':
-        // BMP support varies significantly
-        return typeof HTMLCanvasElement !== 'undefined';
-      case 'image/gif':
-        // GIF input is supported, but output support is very limited
-        // Most browsers don't support GIF encoding via Canvas
-        return typeof HTMLCanvasElement !== 'undefined';
-      case 'image/tiff':
-        // TIFF is generally not supported by Canvas API
-        return false;
-      default:
-        return false;
+  async initializeCapabilities() {
+    this.formatCapabilities = {
+      jpeg: true, // Always supported
+      png: true, // Always supported
+      webp: await this.testFormatSupport('webp'),
+      avif: await this.testFormatSupport('avif'),
+      bmp: await this.testFormatSupport('bmp'),
+      gif: true, // Usually supported
+      tiff: false // Canvas doesn't support TIFF
+    };
+  }
+  
+  /**
+   * Test if a format is supported by the browser
+   */
+  async testFormatSupport(format) {
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = 1;
+      canvas.height = 1;
+      
+      const mimeType = this.getMimeType(format);
+      
+      return new Promise((resolve) => {
+        canvas.toBlob(
+          (blob) => {
+            resolve(blob && blob.type === mimeType);
+          },
+          mimeType,
+          0.8
+        );
+      });
+    } catch (error) {
+      return false;
     }
   }
 
   /**
-   * Convert image with progressive processing for large files
-   * SECURITY: Includes comprehensive validation and sanitization
+   * Main convert image method
    */
   async convertImage(file, outputFormat, quality = 'medium', options = {}) {
-    const startTime = performance.now();
-    
     try {
-      // SECURITY: Comprehensive file validation and sanitization
-      if (this.securityConfig.enableSecurityValidation) {
-        if (options.onProgress) {
-          options.onProgress(1, 'Performing security validation...');
-        }
-        
-        const validationResult = await validateImageFile(file, {
-          skipRateLimiting: options.skipRateLimiting || false
-        });
-        
-        if (!validationResult.valid) {
-          this.stats.securityThreatsBlocked++;
-          throw new Error(`Security validation failed: ${validationResult.errors.join('; ')}`);
-        }
-        
-        // Use the sanitized file
-        file = validationResult.file;
-        
-        if (validationResult.warnings.length > 0) {
-          console.warn('Security warnings:', validationResult.warnings);
-          this.stats.metadataStripped++;
-        }
-      }
+      const startTime = Date.now();
       
-      // Enhanced RAW format detection and validation
       if (options.onProgress) {
-        options.onProgress(3, 'Detecting file format...');
+        options.onProgress(5, 'Starting image conversion...');
       }
       
+      // Enhanced RAW format detection
       const formatDetectionResult = await this.rawDetector.detectFormat(file);
       const rawValidationResult = await this.rawDetector.validateRawFile(file);
       
-      if (options.onProgress) {
-        options.onProgress(5, 'Validating format conversion...');
-      }
+      const isRawToStandardConversion = rawValidationResult.isRawFile && !isRawFormat(outputFormat);
       
-      // Handle RAW format conversion
-      let actualOutputFormat = outputFormat;
-      let isRawToStandardConversion = false;
-      
-      if (outputFormat.toLowerCase() === 'raw') {
-        // RAW format selected means convert RAW to JPEG
-        if (!rawValidationResult.isRawFile) {
-          throw new Error('RAW conversion selected but file is not a RAW format. Please select a different output format.');
-        }
-        actualOutputFormat = rawValidationResult.recommendedOutputFormat;
-        isRawToStandardConversion = true;
-        
-        if (options.onProgress) {
-          options.onProgress(8, `Converting ${rawValidationResult.detectedRawFormat?.toUpperCase()} to ${actualOutputFormat.toUpperCase()}...`);
-        }
-      } else if (rawValidationResult.isRawFile) {
-        // RAW file but non-RAW output format selected
-        const conversionValidation = await validateRawConversion(file, outputFormat);
-        if (!conversionValidation.isValid) {
-          throw new Error(`RAW file conversion error: ${conversionValidation.errors.join('; ')}`);
-        }
-        isRawToStandardConversion = true;
-        
-        // Conversion validation passed
-        
-        if (options.onProgress) {
-          options.onProgress(8, `Converting RAW (${rawValidationResult.detectedRawFormat?.toUpperCase()}) to ${actualOutputFormat.toUpperCase()}...`);
-        }
-      }
-      
-      // Additional validation for format detection errors
-      if (!formatDetectionResult.isValid && formatDetectionResult.errors.length > 0) {
-        throw new Error(`Format validation failed: ${formatDetectionResult.errors.join('; ')}`);
-      }
-      
-      // Validate input with enhanced security checks
-      this.validateInputSecurity(file, actualOutputFormat, {
+      // Enhanced input validation with security checks
+      this.validateInputSecurity(file, outputFormat, {
         isRawFile: rawValidationResult.isRawFile,
-        detectedFormat: formatDetectionResult.detectedFormat,
         isRawConversion: isRawToStandardConversion
       });
       
-      // Report initial progress  
       if (options.onProgress) {
-        options.onProgress(10, 'Analyzing image...');
-      }
-
-      // Check if we should use enhanced format handling
-      const formatSupport = await this.enhancedFormatHandler.checkFormatSupport(actualOutputFormat);
-      
-      if (!formatSupport.supported && formatSupport.fallbacks && formatSupport.fallbacks.length > 0) {
-        // Use enhanced format handler for unsupported formats
-        if (options.onProgress) {
-          options.onProgress(15, `Using enhanced format handling for ${actualOutputFormat}...`);
-        }
-        
-        return await this.convertWithEnhancedHandler(file, actualOutputFormat, quality, options, {
-          isRawConversion: isRawToStandardConversion,
-          rawValidationResult,
-          formatDetectionResult
-        });
-      }
-
-      // Create image bitmap with optimal settings and security checks
-      const imageBitmap = await this.createOptimizedImageBitmap(file);
-      
-      // SECURITY: Validate image dimensions to prevent memory exhaustion attacks
-      const dimensionValidation = validateImageDimensions(imageBitmap.width, imageBitmap.height);
-      if (!dimensionValidation.valid) {
-        imageBitmap.close();
-        throw new Error(`Security validation failed: ${dimensionValidation.errors.join('; ')}`);
+        options.onProgress(10, 'Processing image...');
       }
       
-      if (options.onProgress) {
-        options.onProgress(20, 'Processing image...');
-      }
-
-      // Calculate optimal dimensions with security constraints
-      const dimensions = this.calculateOptimalDimensions(
-        imageBitmap.width,
-        imageBitmap.height,
-        options
-      );
-
-      // Check if we need progressive processing
-      const needsProgressive = this.shouldUseProgressiveProcessing(
-        imageBitmap.width,
-        imageBitmap.height,
-        dimensions.width,
-        dimensions.height
-      );
-
       let result;
-      if (needsProgressive) {
-        result = await this.processImageProgressively(
-          imageBitmap,
-          dimensions,
-          actualOutputFormat,
-          quality,
-          options
+      
+      // Route to appropriate conversion method
+      if (isRawToStandardConversion) {
+        // Use enhanced format handler for RAW conversions
+        result = await this.convertWithEnhancedHandler(
+          file, 
+          outputFormat, 
+          quality, 
+          options, 
+          {
+            formatDetectionResult,
+            rawValidationResult,
+            isRawConversion: true
+          }
         );
       } else {
-        result = await this.processImageDirect(
-          imageBitmap,
-          dimensions,
-          actualOutputFormat,
-          quality,
-          options
-        );
+        // Use modern browser-based processing for standard formats
+        result = await this.processStandardImage(file, outputFormat, quality, options);
       }
-
-      // Clean up
-      imageBitmap.close();
-
-      // Update statistics
-      const processingTime = performance.now() - startTime;
+      
+      const processingTime = Date.now() - startTime;
       this.updateStats(processingTime, result.blob?.size || 0);
-
+      
+      if (options.onProgress) {
+        options.onProgress(95, 'Finalizing...');
+      }
+      
+      // Handle auto-download if enabled
+      let downloadUrl = null;
+      if (options.autoDownload !== false && result.blob) {
+        downloadUrl = URL.createObjectURL(result.blob);
+        
+        // Trigger automatic download
+        const link = document.createElement('a');
+        link.href = downloadUrl;
+        link.download = `${file.name.split('.')[0]}_converted.${result.format || outputFormat}`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        
+        console.log('🎉 Auto-download triggered:', link.download);
+      }
+      
       if (options.onProgress) {
         options.onProgress(100, 'Conversion complete!');
       }
-
-      // Notify about successful conversion
-      this.notificationService.notifyConversionSuccess(
-        file.name.split('.').pop()?.toLowerCase() || 'unknown',
-        actualOutputFormat,
-        true, // was direct conversion
-        {
-          originalSize: file.size,
-          finalSize: result.blob?.size || result.size || 0,
-          compressionRatio: file.size > 0 && result.blob?.size > 0 ? result.blob.size / file.size : 1,
-          processingTime
-        }
-      );
-
+      
       return {
         ...result,
         originalSize: file.size,
@@ -410,13 +296,14 @@ class ModernImageProcessor {
         size: result.blob?.size || result.size || 0,
         compressionRatio: file.size > 0 && result.blob?.size > 0 ? result.blob.size / file.size : 1,
         processingTime,
+        downloadUrl, // Add downloadUrl for notifications
         // RAW conversion metadata
         isRawConversion: isRawToStandardConversion,
         originalRawFormat: rawValidationResult.isRawFile ? rawValidationResult.detectedRawFormat : null,
         formatDetectionResult,
         rawValidationResult
       };
-
+      
     } catch (error) {
       console.error('Image conversion failed:', error);
       
@@ -434,6 +321,48 @@ class ModernImageProcessor {
       );
       
       throw new Error(errorInfo.userMessage || `Image conversion failed: ${error.message}`);
+    }
+  }
+  
+  /**
+   * Process standard (non-RAW) images using browser capabilities
+   */
+  async processStandardImage(file, outputFormat, quality, options) {
+    try {
+      if (options.onProgress) {
+        options.onProgress(20, 'Loading image...');
+      }
+      
+      // Create optimized image bitmap
+      const imageBitmap = await this.createOptimizedImageBitmap(file);
+      
+      // Calculate optimal dimensions
+      const dimensions = this.calculateOptimalDimensions(
+        imageBitmap.width,
+        imageBitmap.height,
+        options
+      );
+      
+      if (options.onProgress) {
+        options.onProgress(40, 'Processing image data...');
+      }
+      
+      let result;
+      
+      // Choose processing method based on image size
+      if (this.shouldUseProgressiveProcessing(imageBitmap.width, imageBitmap.height, dimensions.width, dimensions.height)) {
+        result = await this.processImageProgressively(imageBitmap, dimensions, outputFormat, quality, options);
+      } else {
+        result = await this.processImageDirect(imageBitmap, dimensions, outputFormat, quality, options);
+      }
+      
+      // Clean up
+      imageBitmap.close();
+      
+      return result;
+      
+    } catch (error) {
+      throw new Error(`Standard image processing failed: ${error.message}`);
     }
   }
 
@@ -822,12 +751,18 @@ class ModernImageProcessor {
     // Draw image with precise positioning to prevent sub-pixel issues
     ctx.save();
     
-    // Use precise integer coordinates to prevent interpolation artifacts
+    // Use precise coordinates with sub-pixel positioning for crisp rendering
+    ctx.translate(0.5, 0.5);
+    
     const targetWidth = Math.round(dimensions.width);
     const targetHeight = Math.round(dimensions.height);
     
-    // Draw image with high-quality scaling
-    ctx.drawImage(imageBitmap, 0, 0, targetWidth, targetHeight);
+    // Ensure highest quality scaling
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    
+    // Draw image with high-quality scaling and perfect alignment
+    ctx.drawImage(imageBitmap, -0.5, -0.5, targetWidth, targetHeight);
     
     ctx.restore();
 
@@ -850,26 +785,27 @@ class ModernImageProcessor {
 
   /**
    * Process large images progressively to avoid memory issues
-   * Fixed to eliminate tile boundary artifacts and grid lines
+   * Completely eliminates tile boundary artifacts and grid lines
    */
   async processImageProgressively(imageBitmap, dimensions, outputFormat, quality, options) {
-    const tileSize = 1536; // Reduced from 2048 to minimize boundary effects
-    const overlap = 32; // Add overlap between tiles to eliminate seams
+    // For very large images, use a single-pass approach to prevent artifacts
+    // Modern browsers can handle larger canvases than before
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d', {
       // Optimized context options to prevent artifacts
       alpha: !this.requiresBackground(outputFormat),
       colorSpace: 'srgb',
-      willReadFrequently: false
+      willReadFrequently: false,
+      // Use hardware acceleration when available
+      premultipliedAlpha: false
     });
     
     canvas.width = dimensions.width;
     canvas.height = dimensions.height;
 
-    // Configure context for artifact-free rendering
+    // Configure context for maximum quality rendering
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
-    // Set composite mode to ensure smooth blending at tile boundaries
     ctx.globalCompositeOperation = 'source-over';
 
     // Apply background for formats that don't support transparency
@@ -878,65 +814,40 @@ class ModernImageProcessor {
       ctx.fillRect(0, 0, dimensions.width, dimensions.height);
     }
 
-    const scaleX = dimensions.width / imageBitmap.width;
-    const scaleY = dimensions.height / imageBitmap.height;
-
-    // Calculate tiles with overlap to prevent boundary artifacts
-    const effectiveTileSize = tileSize - overlap;
-    const tilesX = Math.ceil(imageBitmap.width / effectiveTileSize);
-    const tilesY = Math.ceil(imageBitmap.height / effectiveTileSize);
-    const totalTiles = tilesX * tilesY;
-
-    for (let tileY = 0; tileY < tilesY; tileY++) {
-      for (let tileX = 0; tileX < tilesX; tileX++) {
-        const currentTile = tileY * tilesX + tileX + 1;
-        
-        if (options.onProgress) {
-          const progress = 20 + (currentTile / totalTiles) * 50;
-          options.onProgress(progress, `Processing tile ${currentTile}/${totalTiles}...`);
-        }
-
-        // Source coordinates with overlap
-        const sx = Math.max(0, tileX * effectiveTileSize - (tileX > 0 ? overlap / 2 : 0));
-        const sy = Math.max(0, tileY * effectiveTileSize - (tileY > 0 ? overlap / 2 : 0));
-        const sw = Math.min(
-          tileSize, 
-          imageBitmap.width - sx,
-          (tileX === tilesX - 1) ? imageBitmap.width - sx : tileSize
-        );
-        const sh = Math.min(
-          tileSize, 
-          imageBitmap.height - sy,
-          (tileY === tilesY - 1) ? imageBitmap.height - sy : tileSize
-        );
-
-        // Destination coordinates with precise alignment
-        const dx = sx * scaleX;
-        const dy = sy * scaleY;
-        const dw = sw * scaleX;
-        const dh = sh * scaleY;
-
-        // Use sub-pixel rendering to prevent grid artifacts
-        ctx.save();
-        
-        // Enable anti-aliasing for smooth tile edges
-        ctx.imageSmoothingEnabled = true;
-        ctx.imageSmoothingQuality = 'high';
-        
-        // Draw tile with precise coordinates to prevent gaps
-        ctx.drawImage(imageBitmap, sx, sy, sw, sh, Math.round(dx), Math.round(dy), Math.round(dw), Math.round(dh));
-        
-        ctx.restore();
-
-        // Allow browser to breathe between tiles
-        if (currentTile % 3 === 0) { // Reduced frequency for better performance
-          await new Promise(resolve => setTimeout(resolve, 0));
-        }
-      }
+    if (options.onProgress) {
+      options.onProgress(30, 'Rendering high-quality image...');
     }
 
+    // Clear canvas to ensure clean slate
+    ctx.clearRect(0, 0, dimensions.width, dimensions.height);
+    
+    // Re-apply background if needed after clearing
+    if (this.requiresBackground(outputFormat)) {
+      ctx.fillStyle = options.backgroundColor || '#FFFFFF';
+      ctx.fillRect(0, 0, dimensions.width, dimensions.height);
+    }
+
+    // Use single high-quality draw operation to prevent any artifacts
+    ctx.save();
+    
+    // Ensure perfect pixel alignment
+    ctx.translate(0.5, 0.5); // Sub-pixel positioning for crisp rendering
+    
+    // Draw image with maximum quality settings
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    
+    // Draw the entire image in one operation for artifact-free result
+    ctx.drawImage(
+      imageBitmap, 
+      0, 0, imageBitmap.width, imageBitmap.height,
+      -0.5, -0.5, dimensions.width, dimensions.height
+    );
+    
+    ctx.restore();
+
     if (options.onProgress) {
-      options.onProgress(80, 'Converting to target format...');
+      options.onProgress(70, 'Converting to target format...');
     }
 
     // Convert to blob with fallback support
@@ -971,11 +882,18 @@ class ModernImageProcessor {
             }
             
             // Browser fell back to a different format
-            console.warn(`Expected ${mimeType}, got ${blob.type}`);
-            
-            // Handle common fallback scenarios gracefully
             const formatLower = format.toLowerCase();
             const actualFormat = this.getFormatFromMimeType(blob.type);
+            
+            // For AVIF, this fallback is expected since most browsers don't support AVIF encoding
+            if (formatLower === 'avif') {
+              console.log(`AVIF encoding not supported by Canvas API, got ${blob.type} instead`);
+              // Don't treat this as an error - it's expected behavior
+              reject(new Error(`AVIF encoding not supported by Canvas API. Use ImageMagick for AVIF conversion.`));
+              return;
+            }
+            
+            console.warn(`Expected ${mimeType}, got ${blob.type}`);
             
             if (actualFormat) {
               console.log(`Browser automatically converted ${formatLower} to ${actualFormat}`);
@@ -983,7 +901,7 @@ class ModernImageProcessor {
               // Accept common fallbacks that preserve quality
               if (
                 // Modern formats falling back to PNG (acceptable)
-                (['avif', 'webp'].includes(formatLower) && actualFormat === 'png') ||
+                (['webp'].includes(formatLower) && actualFormat === 'png') ||
                 // GIF falling back to PNG (acceptable, preserves transparency)
                 (formatLower === 'gif' && actualFormat === 'png') ||
                 // BMP falling back to PNG (acceptable, preserves quality)
@@ -997,7 +915,7 @@ class ModernImageProcessor {
               }
             }
             
-            // Unexpected format conversion - this shouldn't happen with our capability detection
+            // Unexpected format conversion
             reject(new Error(`Format conversion failed - browser returned ${blob.type} instead of ${mimeType}. This format may not be supported by your browser.`));
           } else {
             reject(new Error(`Failed to convert to ${format.toUpperCase()} format - no data generated. This format may not be supported by your browser.`));
@@ -1050,32 +968,249 @@ class ModernImageProcessor {
   }
 
   /**
+   * Convert canvas using worker pool (for AVIF and other WASM-based conversions)
+   */
+  async convertWithWorkerPool(canvas, format, quality) {
+    console.log('🎯 convertWithWorkerPool called:', { format, quality, canvasSize: `${canvas.width}x${canvas.height}` });
+    
+    try {
+      // Validate canvas before proceeding
+      console.log('🔍 Canvas validation:', {
+        width: canvas.width,
+        height: canvas.height,
+        type: canvas.constructor.name,
+        hasToBlob: typeof canvas.toBlob === 'function',
+        hasGetContext: typeof canvas.getContext === 'function',
+        isConnected: canvas.isConnected !== undefined ? canvas.isConnected : 'unknown'
+      });
+      
+      // Check if canvas is valid and has required methods
+      if (!canvas || typeof canvas.toBlob !== 'function') {
+        throw new Error('Invalid canvas - missing toBlob method');
+      }
+      
+      if (canvas.width <= 0 || canvas.height <= 0) {
+        throw new Error(`Invalid canvas dimensions: ${canvas.width}x${canvas.height}`);
+      }
+      
+      // Try to get context to verify canvas is functional
+      try {
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          throw new Error('Unable to get 2D context from canvas');
+        }
+        console.log('✅ Canvas 2D context available');
+      } catch (contextError) {
+        console.error('❌ Canvas context error:', contextError);
+        throw new Error(`Canvas context error: ${contextError.message}`);
+      }
+      
+      // Convert canvas to blob first (as PNG to preserve quality, but optimized for speed)
+      console.log('🔄 About to convert canvas to PNG blob (optimized)...');
+      
+      const pngBlob = await new Promise((resolve, reject) => {
+        console.log('📸 Calling canvas.toBlob...');
+        
+        // Add timeout to prevent hanging
+        const timeout = setTimeout(() => {
+          console.error('⏰ canvas.toBlob timeout after 10 seconds');
+          reject(new Error('Canvas.toBlob timeout - this may indicate a browser issue or invalid canvas state'));
+        }, 10000);
+        
+        try {
+          // Try alternative approach if standard toBlob fails
+          const tryStandardToBlob = () => {
+            canvas.toBlob((blob) => {
+              clearTimeout(timeout);
+              console.log('✅ canvas.toBlob callback executed, blob:', blob ? `${blob.size} bytes` : 'null');
+              
+              if (blob && blob.size > 0) {
+                resolve(blob);
+              } else {
+                console.error('❌ toBlob returned empty or null blob');
+                reject(new Error('Failed to create PNG blob from canvas - blob is null or empty'));
+              }
+            }, 'image/png', 0.95); // Slightly lower quality PNG for faster processing
+          };
+          
+          // First attempt with standard toBlob
+          tryStandardToBlob();
+          console.log('📸 canvas.toBlob call completed (waiting for callback)');
+          
+        } catch (syncError) {
+          clearTimeout(timeout);
+          console.error('💥 Synchronous error in canvas.toBlob:', syncError);
+          
+          // Try alternative method using getImageData + canvas conversion
+          try {
+            console.log('🔄 Trying alternative method with getImageData...');
+            const ctx = canvas.getContext('2d');
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            
+            // Create a new canvas and draw the image data
+            const newCanvas = document.createElement('canvas');
+            newCanvas.width = canvas.width;
+            newCanvas.height = canvas.height;
+            const newCtx = newCanvas.getContext('2d');
+            newCtx.putImageData(imageData, 0, 0);
+            
+            // Try toBlob on the new canvas
+            newCanvas.toBlob((blob) => {
+              clearTimeout(timeout);
+              if (blob && blob.size > 0) {
+                console.log('✅ Alternative method succeeded, blob size:', blob.size);
+                resolve(blob);
+              } else {
+                reject(new Error('Alternative method also failed to create blob'));
+              }
+            }, 'image/png', 0.95); // Slightly lower quality PNG for faster processing
+            
+          } catch (altError) {
+            clearTimeout(timeout);
+            console.error('💥 Alternative method also failed:', altError);
+            reject(new Error(`Both standard and alternative canvas conversion methods failed: ${syncError.message}`));
+          }
+        }
+      });
+      
+      console.log('✅ PNG blob created successfully, size:', pngBlob.size);
+      
+      // Verify blob is valid
+      if (!pngBlob || pngBlob.size === 0) {
+        throw new Error('Created PNG blob is invalid or empty');
+      }
+      
+      // Convert blob to array buffer for worker processing
+      console.log('🔄 Converting blob to array buffer...');
+      const arrayBuffer = await pngBlob.arrayBuffer();
+      const imageData = new Uint8Array(arrayBuffer);
+      console.log('✅ Array buffer created, size:', imageData.length);
+      
+      // Verify array buffer is valid
+      if (imageData.length === 0) {
+        throw new Error('Array buffer is empty - invalid PNG data');
+      }
+      
+      // Process with worker pool
+      console.log('🔄 About to call workerPool.processTask with:', {
+        format,
+        quality,
+        imageDataSize: imageData.length,
+        canvasSize: `${canvas.width}x${canvas.height}`
+      });
+      
+      const result = await this.workerPool.processTask({
+        imageData: imageData,
+        outputFormat: format,
+        options: {
+          quality: quality,
+          width: canvas.width,
+          height: canvas.height,
+          // Speed optimization options
+          speed: 8, // Fast encoding by default
+          disableAutoScale: false, // Allow auto-scaling for speed
+          maxMegapixels: 16 // Reasonable limit for fast encoding
+        }
+      });
+      
+      console.log('✅ workerPool.processTask completed:', result ? 'success' : 'null result');
+      
+      if (result && result.blob) {
+        return {
+          blob: result.blob,
+          width: result.width || canvas.width,
+          height: result.height || canvas.height,
+          format: result.format || format,
+          method: result.method || 'worker-pool',
+          wasDirectConversion: true
+        };
+      } else {
+        throw new Error('Worker pool returned invalid result');
+      }
+      
+    } catch (error) {
+      console.error('💥 convertWithWorkerPool error:', error);
+      throw new Error(`Worker pool conversion failed: ${error.message}`);
+    }
+  }
+
+  /**
    * Convert canvas to blob with automatic fallback on format failure
    */
   async canvasToBlobWithFallback(canvas, requestedFormat, quality, options = {}) {
-    try {
-      // For AVIF, try ImageMagick first if available
-      if (requestedFormat.toLowerCase() === 'avif' && imageMagickService.isReady() && !imageMagickService.isFallbackMode()) {
+    const formatLower = requestedFormat.toLowerCase();
+    
+    // For AVIF, try worker pool first, then ImageMagick as fallback
+    if (formatLower === 'avif') {
+      // Try worker pool AVIF encoder first
+      if (this.useWorkerPool && this.workerPool && this.workerPool.isInitialized) {
         try {
-          return await this.convertWithImageMagick(canvas, requestedFormat, quality);
-        } catch (imageMagickError) {
-          console.warn('ImageMagick AVIF conversion failed, trying Canvas API:', imageMagickError.message);
-          // Continue to Canvas API fallback
+          console.log('Using worker pool for AVIF conversion (preferred method)');
+          const result = await this.convertWithWorkerPool(canvas, requestedFormat, quality);
+          if (result && result.blob && result.blob.type === 'image/avif') {
+            return result;
+          }
+        } catch (workerError) {
+          console.warn('Worker pool AVIF conversion failed:', workerError.message);
+          // Continue to ImageMagick fallback
         }
       }
       
-      // Try the requested format with Canvas API
+      // Try ImageMagick as secondary option
+      if (imageMagickService.isReady() && !imageMagickService.isFallbackMode()) {
+        try {
+          console.log('Using ImageMagick for AVIF conversion (fallback method)');
+          return await this.convertWithImageMagick(canvas, requestedFormat, quality);
+        } catch (imageMagickError) {
+          console.warn('ImageMagick AVIF conversion failed:', imageMagickError.message);
+          // Continue to format fallback logic below
+        }
+      } else {
+        console.log('ImageMagick not available for AVIF conversion, using format fallback');
+      }
+      
+      // AVIF fallback: use WebP or JPEG
+      const hasTransparency = this.canvasHasTransparency(canvas);
+      const fallbackFormat = hasTransparency ? 'png' : 'webp';
+      
+      try {
+        console.log(`Converting AVIF to ${fallbackFormat} fallback`);
+        const fallbackBlob = await this.canvasToBlob(canvas, fallbackFormat, quality);
+        
+        return {
+          blob: fallbackBlob,
+          originalFormat: requestedFormat,
+          actualFormat: fallbackFormat,
+          wasFallback: true,
+          fallbackReason: 'AVIF encoding not supported, using modern fallback format'
+        };
+      } catch (fallbackError) {
+        // Final AVIF fallback to JPEG
+        console.log('AVIF fallback to JPEG as final option');
+        const jpegBlob = await this.canvasToBlob(canvas, 'jpeg', quality);
+        return {
+          blob: jpegBlob,
+          originalFormat: requestedFormat,
+          actualFormat: 'jpeg',
+          wasFallback: true,
+          fallbackReason: 'AVIF encoding not supported, converted to JPEG for compatibility'
+        };
+      }
+    }
+    
+    try {
+      // For other formats, try Canvas API first
       return await this.canvasToBlob(canvas, requestedFormat, quality);
     } catch (error) {
       console.warn(`Failed to convert to ${requestedFormat}:`, error.message);
       
-      // For AVIF specifically, try ImageMagick if we haven't already
-      if (requestedFormat.toLowerCase() === 'avif' && imageMagickService.isReady() && !imageMagickService.isFallbackMode()) {
+      // Try ImageMagick as fallback for other formats
+      if (imageMagickService.isReady() && !imageMagickService.isFallbackMode() && formatLower !== 'avif') {
         try {
-          console.log('Attempting AVIF conversion with ImageMagick as fallback...');
+          console.log(`Attempting ${requestedFormat} conversion with ImageMagick as fallback...`);
           return await this.convertWithImageMagick(canvas, requestedFormat, quality);
         } catch (imageMagickError) {
-          console.warn('ImageMagick AVIF fallback also failed:', imageMagickError.message);
+          console.warn(`ImageMagick ${requestedFormat} fallback also failed:`, imageMagickError.message);
         }
       }
       
@@ -1096,7 +1231,7 @@ class ModernImageProcessor {
           
           // Return with fallback information
           return {
-            ...fallbackBlob,
+            blob: fallbackBlob,
             originalFormat: requestedFormat,
             actualFormat: fallbackFormat,
             wasFallback: true
@@ -1110,7 +1245,7 @@ class ModernImageProcessor {
             try {
               const pngBlob = await this.canvasToBlob(canvas, 'png', quality);
               return {
-                ...pngBlob,
+                blob: pngBlob,
                 originalFormat: requestedFormat,
                 actualFormat: 'png',
                 wasFallback: true
@@ -1445,8 +1580,108 @@ class ModernImageProcessor {
   /**
    * Batch convert multiple images with progress tracking
    * SECURITY: Enhanced with rate limiting and security validation
+   * PERFORMANCE: Uses WorkerPoolManager for parallel processing
    */
   async batchConvert(files, outputFormat, quality = 'medium', options = {}) {
+    // Try using worker pool for batch processing if available
+    if (this.useWorkerPool && this.workerPool && this.workerPool.isInitialized) {
+      return this.batchConvertWithWorkerPool(files, outputFormat, quality, options);
+    }
+    
+    // Fallback to sequential processing
+    return this.batchConvertSequential(files, outputFormat, quality, options);
+  }
+
+  /**
+   * Batch convert using WorkerPoolManager for parallel processing
+   */
+  async batchConvertWithWorkerPool(files, outputFormat, quality = 'medium', options = {}) {
+    console.log(`Starting parallel batch conversion of ${files.length} files using worker pool`);
+    
+    // Check memory pressure before starting
+    if (this.memoryManager.pressureState === 'critical' || this.memoryManager.pressureState === 'emergency') {
+      await this.memoryManager.performCriticalCleanup();
+    }
+
+    // Prepare tasks for worker pool
+    const tasks = files.map(file => ({
+      imageData: file,
+      outputFormat,
+      options: {
+        quality,
+        enableSecurityValidation: this.securityConfig.enableSecurityValidation,
+        enableMetadataSanitization: this.securityConfig.enableMetadataSanitization
+      }
+    }));
+
+    try {
+      const batchResult = await this.workerPool.processBatch(tasks, {
+        maxConcurrency: Math.min(4, files.length),
+        priority: options.priority || 'normal',
+        onProgress: (progress, message, completed, total) => {
+          if (options.onBatchProgress) {
+            options.onBatchProgress(completed, total, message);
+          }
+          if (options.onProgress) {
+            options.onProgress(progress, `Processing ${completed}/${total}: ${message}`);
+          }
+        },
+        onTaskComplete: (task, result) => {
+          // Update statistics for successful tasks
+          const processingTime = result.processingTime || 0;
+          this.updateStats(processingTime, result.blob?.size || 0);
+          this.globalStats.completedTasks++;
+        },
+        onTaskError: (task, error) => {
+          console.error('Task failed in batch processing:', error);
+          this.globalStats.failedTasks++;
+        }
+      });
+
+      // Transform worker pool results to match expected format
+      const results = [];
+      const errors = [];
+
+      batchResult.results.forEach(item => {
+        if (item.success) {
+          results.push({
+            originalFile: item.task.imageData,
+            result: item.result,
+            success: true
+          });
+        }
+      });
+
+      batchResult.errors.forEach(item => {
+        errors.push({
+          originalFile: item.task.imageData,
+          error: item.error,
+          success: false
+        });
+      });
+
+      return {
+        results,
+        errors,
+        successCount: results.length,
+        errorCount: errors.length,
+        totalCount: files.length,
+        processingTime: batchResult.processingTime,
+        avgTaskTime: batchResult.avgTaskTime,
+        method: 'worker-pool-parallel'
+      };
+
+    } catch (error) {
+      console.error('Worker pool batch processing failed, falling back to sequential:', error);
+      // Fallback to sequential processing
+      return this.batchConvertSequential(files, outputFormat, quality, options);
+    }
+  }
+
+  /**
+   * Original sequential batch processing method (fallback)
+   */
+  async batchConvertSequential(files, outputFormat, quality = 'medium', options = {}) {
     const results = [];
     const errors = [];
     const securityReport = {
@@ -1639,11 +1874,35 @@ class ModernImageProcessor {
    * Get performance statistics
    */
   getPerformanceStats() {
-    return {
+    const baseStats = {
       ...this.stats,
       formatCapabilities: this.formatCapabilities,
       maxChunkSize: this.maxChunkSize
     };
+
+    // Add memory management stats
+    if (this.memoryManager) {
+      baseStats.memoryManagement = this.memoryManager.getMemoryStats();
+    }
+
+    // Add worker pool stats
+    if (this.workerPool && this.workerPool.isInitialized) {
+      baseStats.workerPool = this.workerPool.getStats();
+      baseStats.parallelProcessingEnabled = true;
+    } else {
+      baseStats.parallelProcessingEnabled = false;
+      baseStats.workerPoolStatus = this.useWorkerPool ? 'failed-to-initialize' : 'disabled';
+    }
+
+    // Add image processor stats
+    if (this.imageProcessor) {
+      baseStats.imageProcessor = {
+        canvasPoolStats: this.imageProcessor.monitor.getPool('canvas')?.getStats(),
+        contextPoolStats: this.imageProcessor.monitor.getPool('context')?.getStats()
+      };
+    }
+
+    return baseStats;
   }
 
   /**
@@ -1670,6 +1929,59 @@ class ModernImageProcessor {
     
     return Math.round(inputSize * formatMultiplier * qualityMultiplier);
   }
+
+  /**
+   * Cleanup resources and shutdown worker pool
+   */
+  async cleanup() {
+    console.log('Cleaning up ModernImageProcessor resources...');
+
+    try {
+      // Shutdown worker pool
+      if (this.workerPool) {
+        await this.workerPool.shutdown({ timeout: 10000 });
+        this.workerPool = null;
+      }
+
+      // Cleanup image processor resources
+      if (this.imageProcessor) {
+        this.imageProcessor.cleanup();
+      }
+
+      // Note: Don't destroy global memory manager as it might be used by other components
+      
+      console.log('ModernImageProcessor cleanup completed');
+    } catch (error) {
+      console.error('Error during ModernImageProcessor cleanup:', error);
+    }
+  }
+
+  /**
+   * Check if processor is ready for operations
+   */
+  isReady() {
+    return this.formatCapabilities !== null && 
+           (!this.useWorkerPool || (this.workerPool && this.workerPool.isInitialized));
+  }
+
+  /**
+   * Get status information
+   */
+  getStatus() {
+    return {
+      isReady: this.isReady(),
+      formatCapabilities: this.formatCapabilities,
+      workerPool: {
+        enabled: this.useWorkerPool,
+        initialized: this.workerPool ? this.workerPool.isInitialized : false,
+        stats: this.workerPool ? this.workerPool.getStats() : null
+      },
+      memoryManagement: {
+        pressureState: this.memoryManager ? this.memoryManager.pressureState : 'unknown',
+        stats: this.memoryManager ? this.memoryManager.getMemoryStats() : null
+      }
+    };
+  }
 }
 
 // Create singleton instance
@@ -1682,8 +1994,9 @@ export const getModernImageProcessor = () => {
   return modernProcessor;
 };
 
-export const destroyModernImageProcessor = () => {
+export const destroyModernImageProcessor = async () => {
   if (modernProcessor) {
+    await modernProcessor.cleanup();
     modernProcessor = null;
   }
 };

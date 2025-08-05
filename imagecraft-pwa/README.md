@@ -5,10 +5,13 @@ A modern, browser-native Progressive Web Application (PWA) for professional imag
 ## ✨ Features
 
 ### 🔄 Image Converter
+- **AVIF Support** - Full AVIF encoding/decoding using @jsquash/avif WebAssembly
 - **WebAssembly-powered conversion** supporting 20+ formats (JPEG, PNG, WebP, AVIF, HEIC, TIFF, BMP, GIF, and more)
-- **High-quality output** with ImageMagick WASM for professional-grade processing
+- **Optimized AVIF encoding** with precise quality control and automatic downloads
+- **Performance-tuned processing** with auto-scaling for large images (>16MP)
+- **High-quality output** with professional-grade WebAssembly processing
 - **Batch processing** support for multiple files
-- **Smart fallback system** (ImageMagick → Canvas API → Format alternatives)
+- **Smart fallback system** for optimal performance
 
 ### 🎨 Image Editor
 - Professional editing tools (Contrast, White Balance, Exposure, Vibrance, Saturation)
