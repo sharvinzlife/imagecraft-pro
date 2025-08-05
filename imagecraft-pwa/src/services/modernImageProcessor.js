@@ -881,7 +881,12 @@ class ModernImageProcessor {
             // Check if we got the format we requested
             if (blob.type === mimeType) {
               // Perfect - got exactly what we wanted
-              resolve(blob);
+              resolve({
+                blob,
+                actualFormat: format.toLowerCase(),
+                originalFormat: format,
+                wasFallback: false
+              });
               return;
             }
             
@@ -914,7 +919,12 @@ class ModernImageProcessor {
                 (actualFormat === 'jpeg')
               ) {
                 console.log(`Accepting fallback from ${formatLower} to ${actualFormat}`);
-                resolve(blob);
+                resolve({
+                  blob,
+                  actualFormat,
+                  originalFormat: format,
+                  wasFallback: true
+                });
                 return;
               }
             }
