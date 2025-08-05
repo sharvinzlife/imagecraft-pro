@@ -904,31 +904,6 @@ class ModernImageProcessor {
             
             console.warn(`Expected ${mimeType}, got ${blob.type}`);
             
-            if (actualFormat) {
-              console.log(`Browser automatically converted ${formatLower} to ${actualFormat}`);
-              
-              // Accept common fallbacks that preserve quality
-              if (
-                // Modern formats falling back to PNG (acceptable)
-                (['webp'].includes(formatLower) && actualFormat === 'png') ||
-                // GIF falling back to PNG (acceptable, preserves transparency)
-                (formatLower === 'gif' && actualFormat === 'png') ||
-                // BMP falling back to PNG (acceptable, preserves quality)
-                (formatLower === 'bmp' && actualFormat === 'png') ||
-                // Any format falling back to JPEG (acceptable for photos)
-                (actualFormat === 'jpeg')
-              ) {
-                console.log(`Accepting fallback from ${formatLower} to ${actualFormat}`);
-                resolve({
-                  blob,
-                  actualFormat,
-                  originalFormat: format,
-                  wasFallback: true
-                });
-                return;
-              }
-            }
-            
             // Unexpected format conversion
             reject(new Error(`Format conversion failed - browser returned ${blob.type} instead of ${mimeType}. This format may not be supported by your browser.`));
           } else {
