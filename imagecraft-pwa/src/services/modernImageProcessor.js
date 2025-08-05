@@ -277,7 +277,9 @@ class ModernImageProcessor {
         // Trigger automatic download
         const link = document.createElement('a');
         link.href = downloadUrl;
-        link.download = `${file.name.split('.')[0]}_converted.${result.format || outputFormat}`;
+        // Use actualFormat from fallbacks, or format from result, or requested outputFormat
+        const actualFormat = result.actualFormat || result.format || outputFormat;
+        link.download = `${file.name.split('.')[0]}_converted.${actualFormat}`;
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
@@ -778,6 +780,7 @@ class ModernImageProcessor {
       width: targetWidth,
       height: targetHeight,
       format: blobResult.actualFormat || outputFormat,
+      actualFormat: blobResult.actualFormat, // Pass through actualFormat for filename handling
       originalFormat: blobResult.originalFormat,
       wasFallback: blobResult.wasFallback || false
     };
@@ -858,6 +861,7 @@ class ModernImageProcessor {
       width: dimensions.width,
       height: dimensions.height,
       format: blobResult.actualFormat || outputFormat,
+      actualFormat: blobResult.actualFormat, // Pass through actualFormat for filename handling
       originalFormat: blobResult.originalFormat,
       wasFallback: blobResult.wasFallback || false
     };
